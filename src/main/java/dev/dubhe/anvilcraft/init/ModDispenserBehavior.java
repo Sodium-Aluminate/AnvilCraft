@@ -19,6 +19,7 @@ import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.animal.IronGolem;
 import net.minecraft.world.entity.animal.MushroomCow;
@@ -36,7 +37,9 @@ import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.phys.AABB;
 
 import javax.annotation.ParametersAreNonnullByDefault;
+import java.util.Comparator;
 import java.util.List;
+import java.util.TreeSet;
 import java.util.UUID;
 
 @ParametersAreNonnullByDefault
@@ -66,7 +69,8 @@ public class ModDispenserBehavior {
     };
 
     public static void register() {
-        DispenserBlock.registerBehavior(Items.IRON_INGOT, ModDispenserBehavior::ironIngot);
+        DispenserBlock.registerBehavior(Items.IRON_INGOT, ModDispenserBehavior::ironGolemOrMagnet);
+        DispenserBlock.registerBehavior(Items.IRON_BLOCK, ModDispenserBehavior::ironGolemOrMagnet);
         DispenserBlock.registerBehavior(Items.BOWL, ModDispenserBehavior::bowl);
         DispenserBlock.registerBehavior(Items.GOLDEN_APPLE, ModDispenserBehavior::goldenApple);
         DispenserBlock.registerBehavior(ModBlocks.RESIN_BLOCK, ModDispenserBehavior::resinBlock);
@@ -87,32 +91,54 @@ public class ModDispenserBehavior {
         return stack;
     }
 
-    private static ItemStack ironIngot(BlockSource source, ItemStack stack) {
+    private static ItemStack ironGolemOrMagnet(BlockSource source, ItemStack stack) {
         BlockPos blockPos = source.pos().relative(source.state().getValue(DispenserBlock.FACING));
         ServerLevel level = source.level();
-        if (level.getBlockState(blockPos).is(ModBlocks.HOLLOW_MAGNET_BLOCK)) {
+        if (level.getBlockState(blockPos).is(ModBlocks.HOLLOW_MAGNET_BLOCK) && stack.is(Items.IRON_INGOT)) {
             level.setBlockAndUpdate(blockPos, ModBlocks.FERRITE_CORE_MAGNET_BLOCK.getDefaultState());
             ItemStack stack1 = stack.copy();
             stack1.shrink(1);
             return stack1;
         }
-        List<IronGolem> entities =
-            level
-                .getEntities(EntityTypeTest.forClass(IronGolem.class), new AABB(blockPos), Entity::isAlive)
-                .stream()
-                .filter(e -> e.getHealth() < e.getMaxHealth())
-                .toList();
+        List<IronGolem> entities = level.getEntities(
+            EntityTypeTest.forClass(IronGolem.class), new AABB(blockPos),
+            golem -> golem.isAlive() && golem.getHealth() < golem.getMaxHealth()
+        );
+
         if (entities.isEmpty()) return ModDispenserBehavior.DEFAULT_BEHAVIOUR.dispense(source, stack);
-        IronGolem ironGolem = entities.get(level.random.nextInt(0, entities.size()));
-        ironGolem.heal(25.0f);
-        float g = 1.0f + (level.random.nextFloat() - level.random.nextFloat()) * 0.2f;
-        ironGolem.playSound(SoundEvents.IRON_GOLEM_REPAIR, 1.0f, g);
-        ItemStack stack1 = stack.copy();
-        stack1.shrink(1);
+        stack.shrink(1);
+        int leftIronIngots = stack.is(Items.IRON_BLOCK) ? 9 : 1;
+
+        TreeSet<IronGolem> set = new TreeSet<>(Comparator.comparingDouble(LivingEntity::getHealth).thenComparingInt(Entity::hashCode));
+        
+        for (IronGolem e : entities) {
+            if (set.size() < leftIronIngots) {
+                set.add(e);
+            } else if (e.getHealth() < set.last().getHealth()) {
+                set.pollLast();
+                set.add(e);
+            }
+        }
+
+        while (leftIronIngots > 0) {
+            IronGolem ironGolem = set.pollFirst();
+            if (ironGolem == null) break;
+            ironGolem.heal(25.0f);
+            ironGolem.playSound(
+                SoundEvents.IRON_GOLEM_REPAIR, 1.0f,
+                1.0f + (level.random.nextFloat() - level.random.nextFloat()) * 0.2f
+            );
+            leftIronIngots--;
+        }
+
+        if(leftIronIngots>0)DefaultDispenseItemBehavior.spawnItem(
+            source.level(), new ItemStack(Items.IRON_INGOT, leftIronIngots), 6, 
+            source.state().getValue(DispenserBlock.FACING), DispenserBlock.getDispensePosition(source));
+
         for (ServerPlayer player : PlayerUtil.searchPlayerByPos(level, blockPos, 5)) {
             ModCriterionTriggers.REPAIR_IRON_GOLEM.get().trigger(player);
         }
-        return stack1;
+        return stack;
     }
 
     private static ItemStack bowl(BlockSource blockSource, ItemStack stack) {
